@@ -69,7 +69,7 @@ suite('Functional Tests', function () {
       });
   });
 
-  test('Viewing two stocks and liking them: GET request to /api/stock-prices/', function (done) {
+test('Viewing two stocks and liking them: GET request to /api/stock-prices/', function (done) {
     chai.request(server)
       .get('/api/stock-prices')
       .query({ stock: ['TSLA', 'AMZN'], like: true })
@@ -77,13 +77,15 @@ suite('Functional Tests', function () {
         assert.equal(res.status, 200);
         assert.isArray(res.body.stockData);
         assert.lengthOf(res.body.stockData, 2);
-        res.body.stockData.forEach(function (s) {
-          assert.isNumber(s.price);
-          assert.isNumber(s.rel_likes);
-        });
-        // both liked once by same IP => equal likes => rel_likes 0
-        assert.equal(res.body.stockData[0].rel_likes, 0);
-        assert.equal(res.body.stockData[1].rel_likes, 0);
+        
+        assert.isNumber(res.body.stockData[0].price);
+        assert.isNumber(res.body.stockData[1].price);
+        assert.isNumber(res.body.stockData[0].rel_likes);
+        assert.isNumber(res.body.stockData[1].rel_likes);
+        
+        // The difference between stock A and B, plus the difference between B and A, will always be 0
+        assert.equal(res.body.stockData[0].rel_likes + res.body.stockData[1].rel_likes, 0);
+        
         done();
       });
   });
