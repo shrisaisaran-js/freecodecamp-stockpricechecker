@@ -8,17 +8,51 @@ const PROXY =
 // symbol -> Set of hashed IPs that liked it (raw IPs are never stored)
 const likesDb = new Map();
 
+// short-lived quote cache + in-flight de-duplication to avoid hammering the proxy
+const cache = new Map();     // symbol -> { at, value }
+const inflight = new Map();  // symbol -> Promise
+const TTL = 15000;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
 function anonymise(ip) {
   return crypto.createHash('sha256').update(String(ip || '')).digest('hex');
 }
 
-async function getStock(symbol) {
-  const res = await fetch(`${PROXY}/${encodeURIComponent(symbol)}/quote`);
-  const data = await res.json();
-  if (!data || data === 'Unknown symbol' || data === 'Invalid symbol' || data.latestPrice === undefined) {
-    return null;
+async function fetchQuote(symbol) {
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(`${PROXY}/${encodeURIComponent(symbol)}/quote`, {
+        signal: AbortSignal.timeout(5000)
+      });
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch (e) { throw new Error('non-JSON response'); }
+      if (typeof data === 'string' || !data || data.latestPrice === undefined || data.latestPrice === null) {
+        return null; // genuinely unknown symbol
+      }
+      return { stock: data.symbol || symbol, price: Number(data.latestPrice) };
+    } catch (err) {
+      lastErr = err;
+      await sleep(300 * (attempt + 1));
+    }
   }
-  return { stock: data.symbol || symbol.toUpperCase(), price: Number(data.latestPrice) };
+  throw lastErr;
+}
+
+function getStock(symbol) {
+  const hit = cache.get(symbol);
+  if (hit && Date.now() - hit.at < TTL) return Promise.resolve(hit.value);
+  if (inflight.has(symbol)) return inflight.get(symbol);
+  const p = fetchQuote(symbol)
+    .then(value => {
+      if (value) cache.set(symbol, { at: Date.now(), value });
+      return value;
+    })
+    .finally(() => inflight.delete(symbol));
+  inflight.set(symbol, p);
+  return p;
 }
 
 function likesFor(symbol) {
@@ -44,13 +78,17 @@ module.exports = function (app) {
       const wantsLike = like === true || like === 'true';
       const hash = anonymise(req.ip);
 
-      const results = [];
-      for (const sym of symbols) {
-        const info = await getStock(sym);
-        if (!info) return res.json({ error: 'invalid symbol', stock: sym });
-        if (wantsLike) addLike(sym, hash);
-        results.push({ ...info, likes: likesFor(sym) });
-      }
+      const infos = await Promise.all(symbols.map(getStock));
+      const bad = infos.findIndex(i => !i);
+      if (bad !== -1) return res.json({ error: 'invalid symbol', stock: symbols[bad] });
+
+      // apply likes for ALL symbols first, then read counts
+      if (wantsLike) symbols.forEach(sym => addLike(sym, hash));
+      const results = infos.map((info, i) => ({
+        stock: info.stock,
+        price: info.price,
+        likes: likesFor(symbols[i])
+      }));
 
       if (results.length === 1) return res.json({ stockData: results[0] });
 
